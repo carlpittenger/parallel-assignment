@@ -23,58 +23,57 @@ float f4(float x, int intensity);
 }
 #endif
 
+using fn_type = float (*)(float x, int intensity);
+
 // structure to pass thread-specific data
 struct ThreadData {
-  int function_id;
-  float a;
-  float b;
-  float n;
+  fn_type fn;
+  double a;
+  double b;
+  int n;
   int intensity;
-  int num_threads;
+  int nb_threads;
   std::string sync;
   int thread_id;
-  int num_iterations;
-  float *result;
-  // used for thread-level synchronization
-  // pthread_barrier_t *barrier;
+  double *local_result;
+  // const int start;
+  // const int end;
 };
 
 // global variables for result and mutual exclusion
-auto global_result = 0.0;
-pthread_mutex_t mutex;
-
+auto result = 0.0;
+pthread_mutex_t result_mutex;
 
 // numerical integration function
-void *thread_fn(void *arg) {
-  const auto data = static_cast<ThreadData *>(arg);
+[[nodiscard]] auto thread_fn(void *const arg) noexcept -> void * {
+  const auto data = static_cast<const ThreadData *>(arg);
+  const auto fn = data->fn;
+  const auto a = data->a;
+  const auto b = data->b;
+  const auto n = data->n;
+  const auto intensity = data->intensity;
+  const auto nb_threads = data->nb_threads;
+  const auto sync = data->sync;
+  const auto thread_id = data->thread_id;
+  auto &local_result = *(data->local_result);
 
-  auto local_result = 0.0;
+  // calculate the range of iterations for this thread
+  const auto iterations_per_thread = n / nb_threads;
+  const auto start = thread_id * iterations_per_thread;
+  const auto end = start + iterations_per_thread;
 
-  // Calculate the range of iterations for this thread
-  const auto iterations_per_thread = data->num_iterations / data->num_threads;
-  const auto startIteration = data->thread_id * iterations_per_thread;
-  const auto endIteration = startIteration + iterations_per_thread;
-
-  // Perform numerical integration
-  for (auto i = startIteration; i < endIteration; ++i) {
+  // perform numerical integration
+  for (auto i = start; i < end; ++i) {
     const auto x =
-        data->a + (i + 0.5) * ((data->b - data->a) / data->num_iterations);
-    local_result += data->sync == "iteration" ? f1(x, data->intensity)
-                                                  : f2(x, data->intensity);
-  }
+        static_cast<double>(fn(a + (((i + 0.5) * (b - a)) / (n)), intensity));
+    if (sync == "iteration") {
+      pthread_mutex_lock(&result_mutex);
+      result += x;
+      pthread_mutex_unlock(&result_mutex);
+    }
 
-  if (data->sync == "thread") {
-    // Thread-level synchronization
-    pthread_mutex_lock(&mutex);
-    *(data->result) += local_result;
-    pthread_mutex_unlock(&mutex);
-    // wait for all threads to finish
-    // pthread_barrier_wait(data->barrier);
-  } else {
-    // Iteration-level synchronization
-    pthread_mutex_lock(&mutex);
-    global_result += local_result;
-    pthread_mutex_unlock(&mutex);
+    // sync == "thread"
+    local_result += x;
   }
 
   return nullptr;
@@ -89,8 +88,8 @@ void *thread_fn(void *arg) {
   }
 
   const auto function_id = std::atoi(argv[1]);
-  const auto a = std::atoi(argv[2]);
-  const auto b = std::atoi(argv[3]);
+  const auto a = std::atof(argv[2]);
+  const auto b = std::atof(argv[3]);
   const auto n = std::atoi(argv[4]);
   const auto intensity = std::atoi(argv[5]);
   const auto nb_threads = std::atoi(argv[6]);
@@ -104,26 +103,32 @@ void *thread_fn(void *arg) {
   const auto start = std::chrono::system_clock::now();
 
   // do your calculation here
+  const auto fn = [function_id]() {
+    switch (function_id) {
+    case 1:
+      return f1;
+    case 2:
+      return f2;
+    case 3:
+      return f3;
+    default:
+      // case 4:
+      return f4;
+    }
+  }();
 
   // initialize pthread structures
   const auto threads = std::make_unique<pthread_t[]>(nb_threads);
+  const auto local_results = std::make_unique<double[]>(nb_threads);
   const auto thread_data = std::make_unique<ThreadData[]>(nb_threads);
-
-  // pthread_barrier_t barrier;
-  // if (sync_type == "thread") {
-  //   pthread_barrier_init(&barrier, nullptr, nb_threads);
-  // }
-
-  // Calculate the number of iterations per thread
-  const auto iterations_per_thread = n / nb_threads;
 
   // create and run threads
   for (auto i = 0; i < nb_threads; ++i) {
-    thread_data[i] =
-        ThreadData{i,       numThreads, iterations_per_thread, a,
-                   b,       intensity,  &globalResult,         sync,
-                   &barrier};
-    if (pthread_create(&threads[i], nullptr, integrate, &thread_data[i]) != 0) {
+    local_results[i] = 0;
+    thread_data[i] = ThreadData{
+        fn, a, b, n, intensity, nb_threads, sync, i, &local_results[i],
+    };
+    if (pthread_create(&threads[i], nullptr, thread_fn, &thread_data[i]) != 0) {
       std::cerr << "Error creating thread " << i << '\n';
       return EXIT_FAILURE;
     }
@@ -137,17 +142,18 @@ void *thread_fn(void *arg) {
     }
   }
 
-  // clean up
-  // delete[] threads;
-  // delete[] thread_data;
-  // if (sync_type == "thread") {
-  //   pthread_barrier_destroy(&barrier);
-  // }
+  if (sync == "thread") {
+    for (auto i = 0; i < nb_threads; ++i) {
+      result += local_results[i];
+    }
+  }
+
+  result = (static_cast<double>(b - a) * result) / static_cast<double>(n);
 
   const auto end = std::chrono::system_clock::now();
   const auto elapsed_seconds = end - start;
 
   // report result and time
-  std::cout << global_result << '\n';
+  std::cout << result << '\n';
   std::cerr << elapsed_seconds.count() << '\n';
 }
